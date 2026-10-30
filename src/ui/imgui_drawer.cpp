@@ -133,6 +133,12 @@ void ImGuiDrawer::AddDialog(ImGuiDialog* dialog) {
     }
   }
   dialogs_.push_back(dialog);
+  // Draw the new dialog now: with only dialogs that don't repaint
+  // continuously, nothing else might paint until the next guest frame, and a
+  // dialog blocking the guest (XAM UI) would then never appear.
+  if (presenter_) {
+    presenter_->RequestUIPaintFromUIThread();
+  }
 }
 
 void ImGuiDrawer::RemoveDialog(ImGuiDialog* dialog) {
@@ -150,6 +156,11 @@ void ImGuiDrawer::RemoveDialog(ImGuiDialog* dialog) {
   }
   dialogs_.erase(it);
   DetachIfLastDialogRemoved();
+  // Repaint without the removed dialog (if the drawer is still attached;
+  // detaching repaints by itself).
+  if (presenter_ && !dialogs_.empty()) {
+    presenter_->RequestUIPaintFromUIThread();
+  }
 }
 
 void ImGuiDrawer::Initialize() {
