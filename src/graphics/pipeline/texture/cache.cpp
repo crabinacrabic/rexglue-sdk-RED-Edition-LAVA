@@ -689,19 +689,31 @@ TextureCache::Texture::~Texture() {
 void TextureCache::Texture::MakeUpToDateAndWatch(
     const std::unique_lock<std::recursive_mutex>& global_lock) {
   SharedMemory& shared_memory = texture_cache().shared_memory();
+  // The upload (RequestRanges) and this watch are not under one lock. If the CPU wrote the
+  // texture memory in between, the write invalidated the pages before any watch existed: keep
+  // the texture outdated so that it is loaded again, instead of watching stale data that a
+  // later write may never report (upstream 36cd208, issue 590; Xenia has the same window).
   if (base_outdated_) {
     assert_not_zero(GetGuestBaseSize());
-    base_outdated_ = false;
-    base_watch_handle_ = shared_memory.WatchMemoryRange(
-        key().base_page << 12, GetGuestBaseSize(), TextureCache::WatchCallback, this, nullptr, 0);
-    outdated_mask_.fetch_and(~kOutdatedBitBase, std::memory_order_release);
+    if (shared_memory.IsRangeValid(global_lock, key().base_page << 12, GetGuestBaseSize())) {
+      base_outdated_ = false;
+      base_watch_handle_ = shared_memory.WatchMemoryRange(
+          key().base_page << 12, GetGuestBaseSize(), TextureCache::WatchCallback, this, nullptr, 0);
+      outdated_mask_.fetch_and(~kOutdatedBitBase, std::memory_order_release);
+    } else {
+      texture_cache().texture_became_outdated_.store(true, std::memory_order_release);
+    }
   }
   if (mips_outdated_) {
     assert_not_zero(GetGuestMipsSize());
-    mips_outdated_ = false;
-    mips_watch_handle_ = shared_memory.WatchMemoryRange(
-        key().mip_page << 12, GetGuestMipsSize(), TextureCache::WatchCallback, this, nullptr, 1);
-    outdated_mask_.fetch_and(~kOutdatedBitMips, std::memory_order_release);
+    if (shared_memory.IsRangeValid(global_lock, key().mip_page << 12, GetGuestMipsSize())) {
+      mips_outdated_ = false;
+      mips_watch_handle_ = shared_memory.WatchMemoryRange(
+          key().mip_page << 12, GetGuestMipsSize(), TextureCache::WatchCallback, this, nullptr, 1);
+      outdated_mask_.fetch_and(~kOutdatedBitMips, std::memory_order_release);
+    } else {
+      texture_cache().texture_became_outdated_.store(true, std::memory_order_release);
+    }
   }
 }
 

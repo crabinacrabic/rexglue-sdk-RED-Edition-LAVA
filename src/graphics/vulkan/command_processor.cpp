@@ -622,14 +622,10 @@ void VulkanCommandProcessor::InvalidateGpuMemory() {
 void VulkanCommandProcessor::InvalidateAllVertexBufferResidency() {
   vertex_buffers_in_sync_[0] = 0;
   vertex_buffers_in_sync_[1] = 0;
-  for (VertexBufferState& state : vertex_buffer_states_) {
-    state.address = UINT32_MAX;
-    state.size = UINT32_MAX;
-  }
 }
 
 void VulkanCommandProcessor::InvalidateVertexBufferResidency(uint32_t vfetch_index) {
-  if (vfetch_index >= vertex_buffer_states_.size()) {
+  if (vfetch_index >= kVertexFetchCount) {
     return;
   }
   vertex_buffers_in_sync_[vfetch_index >> 6] &= ~(uint64_t(1) << (vfetch_index & 63));
@@ -640,10 +636,10 @@ void VulkanCommandProcessor::InvalidateVertexBufferResidencyRange(uint32_t first
   if (first_vfetch > last_vfetch) {
     std::swap(first_vfetch, last_vfetch);
   }
-  if (first_vfetch >= vertex_buffer_states_.size()) {
+  if (first_vfetch >= kVertexFetchCount) {
     return;
   }
-  last_vfetch = std::min(last_vfetch, uint32_t(vertex_buffer_states_.size() - 1));
+  last_vfetch = std::min(last_vfetch, kVertexFetchCount - 1);
   for (uint32_t vfetch_index = first_vfetch; vfetch_index <= last_vfetch; ++vfetch_index) {
     InvalidateVertexBufferResidency(vfetch_index);
   }
@@ -3565,8 +3561,8 @@ VulkanCommandProcessor::ScratchBufferAcquisition VulkanCommandProcessor::Acquire
   scratch_buffer_ = new_scratch_buffer;
   scratch_buffer_size_ = size;
   // Not used yet, no need for a barrier.
-  scratch_buffer_last_stage_mask_ = initial_access_mask;
-  scratch_buffer_last_access_mask_ = initial_stage_mask;
+  scratch_buffer_last_stage_mask_ = initial_stage_mask;
+  scratch_buffer_last_access_mask_ = initial_access_mask;
   scratch_buffer_last_usage_submission_ = submission_current;
   scratch_buffer_used_ = true;
   return ScratchBufferAcquisition(*this, new_scratch_buffer, initial_stage_mask,
@@ -3957,6 +3953,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
         descriptor_sets_kept = std::min(
             descriptor_sets_kept, uint32_t(SpirvShaderTranslator::kDescriptorSetTexturesPixel));
       }
+      // Sets from the first incompatible one on are disturbed by binding the new pipeline
+      // layout and must be bound again (upstream 30eaa07, as in Xenia).
+      current_graphics_descriptor_sets_bound_up_to_date_ &=
+          (uint32_t(1) << descriptor_sets_kept) - 1;
     } else {
       // No or unknown pipeline layout previously bound - all bindings are in an
       // indeterminate state.
@@ -4076,11 +4076,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
                       vfetch_index, vfetch_constant.dword_0, vfetch_constant.dword_1);
           return false;
       }
-      VertexBufferState& state = vertex_buffer_states_[vfetch_index];
-      if (state.address == vfetch_constant.address && state.size == vfetch_constant.size) {
-        vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
-        continue;
-      }
+      // Always request the range of a vertex fetch that is out of sync: the guest may have
+      // rewritten the buffer in place (same address and size), and only RequestRange uploads
+      // the pages the CPU has written (upstream cf75b89, issue 510).
       if (!shared_memory_->RequestRange(vfetch_constant.address << 2, vfetch_constant.size << 2)) {
         REXGPU_ERROR(
             "Failed to request vertex buffer at 0x{:08X} (size {}) in the shared "
@@ -4088,8 +4086,6 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
             vfetch_constant.address << 2, vfetch_constant.size << 2);
         return false;
       }
-      state.address = vfetch_constant.address;
-      state.size = vfetch_constant.size;
       vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
     }
   }

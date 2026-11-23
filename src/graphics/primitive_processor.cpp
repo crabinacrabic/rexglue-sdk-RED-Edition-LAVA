@@ -1501,7 +1501,10 @@ std::pair<uint32_t, uint32_t> PrimitiveProcessor::MemoryInvalidationCallback(
           // the specified range.
           if (entry_key.base < physical_address_end) {
             uint32_t entry_end = entry_key.base + entry_key.GetSizeBytes();
-            if (entry_end > physical_address_end) {
+            // The entry overlaps the written range if it ends after its start (upstream
+            // 30eaa07, as in Xenia); comparing with the end of the range kept entries that lie
+            // inside it, so an index buffer rewritten in place was drawn from the old data.
+            if (entry_end > physical_address_start) {
               // Invalidate the entry.
               any_invalidated = true;
               // Remove the entry from the cache map.
